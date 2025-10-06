@@ -2,7 +2,7 @@ trigger:
 - main
 
 pool:
-  name: 'Default'
+  vmImage: 'ubuntu-latest'
 
 steps:
 # 1) Instala .NET SDK (ajusta a 8.x o 7.x según necesites)
