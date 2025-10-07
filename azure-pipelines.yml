@@ -68,49 +68,48 @@ steps:
       unzip -o "$ZIP_FILE" -d release
 
       echo "== Contenido de release (recursivo) =="
-      find release -maxdepth 2 -printf "%p\n" | sed 's/^/  /'
+      find release -maxdepth 2 -type f -printf "  %p\n" || true
 
       # Matar procesos previos (dll o binario)
       pkill -f 'dotnet .*\.dll' || true
       pkill -f 'release/' || true
       sleep 1
 
-      ensure_dotnet() {
-        if ! command -v dotnet >/dev/null 2>&1; then
-          curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
-          chmod +x dotnet-install.sh
-          ./dotnet-install.sh --runtime aspnetcore --version latest
-          export DOTNET_ROOT=$HOME/.dotnet
-          export PATH=$PATH:$HOME/.dotnet:$HOME/.dotnet/tools
-        else
-          export DOTNET_ROOT=$(dirname $(dirname $(readlink -f $(which dotnet))))
-        fi
-      }
+      # Instala runtimes necesarios (ASP.NET 8 y .NET 6) y exporta PATH
+      if ! command -v dotnet >/dev/null 2>&1; then
+        curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
+        chmod +x dotnet-install.sh
+        # ASP.NET Core (para apps web actuales)
+        ./dotnet-install.sh --runtime aspnetcore --version latest
+        # .NET 6 runtime (para tu app target Microsoft.NETCore.App 6.x)
+        ./dotnet-install.sh --runtime dotnet --channel 6.0
+        export DOTNET_ROOT=$HOME/.dotnet
+        export PATH=$PATH:$HOME/.dotnet:$HOME/.dotnet/tools
+      else
+        export DOTNET_ROOT=$(dirname $(dirname $(readlink -f $(which dotnet))))
+      fi
 
-      # Buscar DLL o ejecutable EN CUALQUIER SUBCARPETA
-      DLL=$(find release -type f -name "*.dll" | head -n1 || true)
-      APP=$(find release -type f -maxdepth 2 -executable | head -n1 || true)
-
-      # Si no detecta ejecutable por permisos, prueba "cualquier archivo" como candidato y dale +x
+      # Detectar DLL o ejecutable
+      DLL=$(find release -maxdepth 2 -type f -name "*.dll" | head -n1 || true)
+      APP=$(find release -maxdepth 2 -type f -executable | head -n1 || true)
       if [ -z "$APP" ]; then
-        APP=$(find release -type f -maxdepth 2 ! -name "*.json" ! -name "*.pdb" ! -name "*.md" | head -n1 || true)
-        [ -n "$APP" ] && chmod +x "$APP" || true
+        # Si el ejecutable perdió el bit +x en el zip, se lo damos
+        CANDIDATO=$(find release -maxdepth 2 -type f ! -name "*.json" ! -name "*.pdb" ! -name "*.md" | head -n1 || true)
+        [ -n "$CANDIDATO" ] && chmod +x "$CANDIDATO" && APP="$CANDIDATO" || true
       fi
 
       if [ -n "$DLL" ]; then
         echo "== Arrancando DLL: $DLL"
-        ensure_dotnet
         nohup dotnet "$DLL" --urls "http://0.0.0.0:5000" > app.log 2>&1 &
       elif [ -n "$APP" ]; then
         echo "== Arrancando ejecutable: $APP"
         nohup "$APP" --urls "http://0.0.0.0:5000" > app.log 2>&1 &
       else
         echo "ERROR: No encontré DLL ni ejecutable en 'release/'."
-        echo "Lista de archivos encontrada:"
         find release -type f -printf "  %p\n"
         exit 1
       fi
 
-      # Validación mínima: que quedó corriendo algo (dotnet o binario)
+      # Validación mínima
       sleep 2
       pgrep -a dotnet || pgrep -fa "release/" || (echo "No quedó corriendo"; tail -n 200 app.log; exit 1)
