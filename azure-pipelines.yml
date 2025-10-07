@@ -67,21 +67,42 @@ steps:
       rm -rf release && mkdir -p release
       unzip -o "$ZIP_FILE" -d release
 
-      if ! command -v dotnet >/dev/null 2>&1; then
-        curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
-        chmod +x dotnet-install.sh
-        ./dotnet-install.sh --runtime aspnetcore --version latest
-        export DOTNET_ROOT=$HOME/.dotnet
-        export PATH=$PATH:$HOME/.dotnet:$HOME/.dotnet/tools
-      else
-        export DOTNET_ROOT=$(dirname $(dirname $(readlink -f $(which dotnet))))
-      fi
+      echo "Contenido de release:"
+      ls -la release
 
+      # Matar cualquier proceso anterior (DLL o ejecutable)
       pkill -f 'dotnet .*\.dll' || true
+      pkill -f 'release/.*' || true
       sleep 1
 
-      DLL=$(find release -maxdepth 1 -type f -name "*.dll" | head -n1)
-      nohup dotnet "$DLL" --urls "http://0.0.0.0:5000" > app.log 2>&1 &
+      ensure_dotnet() {
+        if ! command -v dotnet >/dev/null 2>&1; then
+          curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
+          chmod +x dotnet-install.sh
+          ./dotnet-install.sh --runtime aspnetcore --version latest
+          export DOTNET_ROOT=$HOME/.dotnet
+          export PATH=$PATH:$HOME/.dotnet:$HOME/.dotnet/tools
+        else
+          export DOTNET_ROOT=$(dirname $(dirname $(readlink -f $(which dotnet))))
+        fi
+      }
 
-      # Validación mínima: proceso en ejecución
-      pgrep -a dotnet
+      # Si hay DLL -> usar dotnet; si no, correr ejecutable publicado
+      if ls release/*.dll >/dev/null 2>&1; then
+        ensure_dotnet
+        DLL=$(ls -1 release/*.dll | head -n1)
+        echo "Arrancando DLL: $DLL"
+        nohup dotnet "$DLL" --urls "http://0.0.0.0:5000" > app.log 2>&1 &
+      else
+        APP=$(find release -maxdepth 1 -type f -executable | head -n1 || true)
+        if [ -z "$APP" ]; then
+          APP=$(ls -1 release/* | head -n1)
+          chmod +x "$APP" || true
+        fi
+        echo "Arrancando ejecutable: $APP"
+        nohup "$APP" --urls "http://0.0.0.0:5000" > app.log 2>&1 &
+      fi
+
+      # Validación mínima: proceso en ejecución (dotnet o binario)
+      sleep 2
+      pgrep -a dotnet || pgrep -fa "release/" || (echo "No quedó corriendo"; tail -n 100 app.log; exit 1)
