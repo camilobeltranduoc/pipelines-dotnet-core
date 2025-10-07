@@ -67,7 +67,7 @@ steps:
       rm -rf release && mkdir -p release
       unzip -o "$ZIP_FILE" -d release
 
-      echo "== Contenido de release (recursivo) =="
+      echo "== Contenido de release (2 niveles) =="
       find release -maxdepth 2 -type f -printf "  %p\n" || true
 
       # Matar procesos previos (dll o binario)
@@ -75,41 +75,32 @@ steps:
       pkill -f 'release/' || true
       sleep 1
 
-      # Instala runtimes necesarios (ASP.NET 8 y .NET 6) y exporta PATH
-      if ! command -v dotnet >/dev/null 2>&1; then
-        curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
-        chmod +x dotnet-install.sh
-        # ASP.NET Core (para apps web actuales)
-        ./dotnet-install.sh --runtime aspnetcore --version latest
-        # .NET 6 runtime (para tu app target Microsoft.NETCore.App 6.x)
-        ./dotnet-install.sh --runtime dotnet --channel 6.0
-        export DOTNET_ROOT=$HOME/.dotnet
-        export PATH=$PATH:$HOME/.dotnet:$HOME/.dotnet/tools
-      else
-        export DOTNET_ROOT=$(dirname $(dirname $(readlink -f $(which dotnet))))
-      fi
-
-      # Detectar DLL o ejecutable
-      DLL=$(find release -maxdepth 2 -type f -name "*.dll" | head -n1 || true)
-      APP=$(find release -maxdepth 2 -type f -executable | head -n1 || true)
-      if [ -z "$APP" ]; then
-        # Si el ejecutable perdió el bit +x en el zip, se lo damos
-        CANDIDATO=$(find release -maxdepth 2 -type f ! -name "*.json" ! -name "*.pdb" ! -name "*.md" | head -n1 || true)
-        [ -n "$CANDIDATO" ] && chmod +x "$CANDIDATO" && APP="$CANDIDATO" || true
-      fi
-
-      if [ -n "$DLL" ]; then
-        echo "== Arrancando DLL: $DLL"
-        nohup dotnet "$DLL" --urls "http://0.0.0.0:5000" > app.log 2>&1 &
-      elif [ -n "$APP" ]; then
+      # 1) Preferir ejecutable self-contained (no requiere runtimes)
+      APP=$(find release -maxdepth 1 -type f -name "pipelines-dotnet-core" -o -maxdepth 1 -type f -executable | head -n1 || true)
+      if [ -n "$APP" ]; then
         echo "== Arrancando ejecutable: $APP"
+        chmod +x "$APP" || true
         nohup "$APP" --urls "http://0.0.0.0:5000" > app.log 2>&1 &
       else
-        echo "ERROR: No encontré DLL ni ejecutable en 'release/'."
-        find release -type f -printf "  %p\n"
-        exit 1
+        # 2) Si no hay ejecutable, usar la DLL (requiere runtimes)
+        DLL=$(find release -maxdepth 2 -type f -name "*.dll" | head -n1 || true)
+        if [ -n "$DLL" ]; then
+          echo "== Arrancando DLL: $DLL"
+          # Instalar dotnet + ASP.NET Core 6.0 (necesario para Microsoft.AspNetCore.App 6.0.0)
+          curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
+          chmod +x dotnet-install.sh
+          ./dotnet-install.sh --runtime dotnet --channel 6.0
+          ./dotnet-install.sh --runtime aspnetcore --channel 6.0
+          export DOTNET_ROOT=$HOME/.dotnet
+          export PATH=$PATH:$HOME/.dotnet:$HOME/.dotnet/tools
+          nohup dotnet "$DLL" --urls "http://0.0.0.0:5000" > app.log 2>&1 &
+        else
+          echo "ERROR: No encontré ejecutable ni DLL en 'release/'."
+          find release -type f -printf "  %p\n"
+          exit 1
+        fi
       fi
 
-      # Validación mínima
+      # Validación mínima: que quedó corriendo algo (dotnet o binario)
       sleep 2
       pgrep -a dotnet || pgrep -fa "release/" || (echo "No quedó corriendo"; tail -n 200 app.log; exit 1)
