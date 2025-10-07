@@ -2,10 +2,10 @@ trigger:
 - main
 
 pool:
-  name: 'Default'
+  name: 'Default'   # tu agente self-hosted
 
 steps:
-# 1) Instala .NET SDK (ajusta a 8.x o 7.x según necesites)
+# 1) Instala .NET SDK (ajusta a 8.x o 7.x si tu proyecto usa otra)
 - task: UseDotNet@2
   displayName: 'Install .NET SDK'
   inputs:
@@ -27,13 +27,23 @@ steps:
     projects: '**/*.csproj'
     arguments: '--configuration Release --no-restore'
 
-# 4) Publish artefacto
+# 4) Publish artefacto -> SELF-CONTAINED SINGLE FILE para linux-x64
 - task: DotNetCoreCLI@2
-  displayName: 'Publish'
+  displayName: 'Publish (self-contained linux-x64 single-file)'
   inputs:
     command: 'publish'
     publishWebProjects: true
-    arguments: '--configuration Release --output $(Build.ArtifactStagingDirectory)'
+    arguments: >
+      --configuration Release
+      -r linux-x64
+      --self-contained true
+      /p:PublishSingleFile=true
+      /p:PublishTrimmed=false
+      /p:IncludeNativeLibrariesForSelfExtract=true
+      /p:UseAppHost=true
+      /p:DebugType=None
+      /p:DebugSymbols=false
+      --output $(Build.ArtifactStagingDirectory)
     zipAfterPublish: true
 
 - task: PublishBuildArtifacts@1
@@ -42,7 +52,7 @@ steps:
     PathtoPublish: '$(Build.ArtifactStagingDirectory)'
     ArtifactName: 'drop'
 
-# ===== DEPLOY A VM POR SSH (simple, sin Kubernetes) =====
+# ===== DEPLOY A VM POR SSH (simple y determinista) =====
 - task: CopyFilesOverSSH@0
   displayName: 'Copiar artefacto a VM'
   inputs:
@@ -53,54 +63,43 @@ steps:
     overwrite: true
 
 - task: SSH@0
-  displayName: 'Descomprimir y arrancar'
+  displayName: 'Descomprimir y arrancar ejecutable'
   inputs:
-    sshEndpoint: 'SSH_VM'                      # <- mismo nombre
+    sshEndpoint: 'SSH_VM'
     runOptions: 'inline'
     inline: |
       set -e
       sudo apt-get update -y || true
-      sudo apt-get install -y unzip psmisc curl || true
+      sudo apt-get install -y unzip psmisc || true
 
       cd /var/www/app
       ZIP_FILE=$(ls -1 *.zip | head -n1)
       rm -rf release && mkdir -p release
       unzip -o "$ZIP_FILE" -d release
 
-      echo "== Contenido de release (2 niveles) =="
+      echo "== Contenido de release =="
       find release -maxdepth 2 -type f -printf "  %p\n" || true
 
-      # Matar procesos previos (dll o binario)
-      pkill -f 'dotnet .*\.dll' || true
+      # Matar procesos anteriores
       pkill -f 'release/' || true
       sleep 1
 
-      # 1) Preferir ejecutable self-contained (no requiere runtimes)
-      APP=$(find release -maxdepth 1 -type f -name "pipelines-dotnet-core" -o -maxdepth 1 -type f -executable | head -n1 || true)
-      if [ -n "$APP" ]; then
-        echo "== Arrancando ejecutable: $APP"
-        chmod +x "$APP" || true
-        nohup "$APP" --urls "http://0.0.0.0:5000" > app.log 2>&1 &
-      else
-        # 2) Si no hay ejecutable, usar la DLL (requiere runtimes)
-        DLL=$(find release -maxdepth 2 -type f -name "*.dll" | head -n1 || true)
-        if [ -n "$DLL" ]; then
-          echo "== Arrancando DLL: $DLL"
-          # Instalar dotnet + ASP.NET Core 6.0 (necesario para Microsoft.AspNetCore.App 6.0.0)
-          curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
-          chmod +x dotnet-install.sh
-          ./dotnet-install.sh --runtime dotnet --channel 6.0
-          ./dotnet-install.sh --runtime aspnetcore --channel 6.0
-          export DOTNET_ROOT=$HOME/.dotnet
-          export PATH=$PATH:$HOME/.dotnet:$HOME/.dotnet/tools
-          nohup dotnet "$DLL" --urls "http://0.0.0.0:5000" > app.log 2>&1 &
-        else
-          echo "ERROR: No encontré ejecutable ni DLL en 'release/'."
-          find release -type f -printf "  %p\n"
-          exit 1
-        fi
+      # Buscar ejecutable self-contained (single-file) y ejecutarlo
+      APP=$(find release -maxdepth 1 -type f \
+            ! -name "*.dll" ! -name "*.json" ! -name "*.pdb" \
+            ! -name "*.config" ! -name "*.map" ! -name "*.txt" ! -name "*.md" \
+            | head -n1 || true)
+
+      if [ -z "$APP" ]; then
+        echo "ERROR: No encontré ejecutable self-contained en 'release/'."
+        find release -type f -printf "  %p\n"
+        exit 1
       fi
 
-      # Validación mínima: que quedó corriendo algo (dotnet o binario)
+      echo "== Ejecutable detectado: $APP"
+      chmod +x "$APP" || true
+      nohup "$APP" --urls "http://0.0.0.0:5000" > app.log 2>&1 &
+
+      # Validación mínima: proceso escuchando/activo
       sleep 2
-      pgrep -a dotnet || pgrep -fa "release/" || (echo "No quedó corriendo"; tail -n 200 app.log; exit 1)
+      pgrep -fa "release/" || (echo "No quedó corriendo"; tail -n 200 app.log; exit 1)
